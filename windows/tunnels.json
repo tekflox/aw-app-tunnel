@@ -10,7 +10,7 @@
         },
         {
           "type": "iframe",
-          "src": "/api/apps/tunnel/ui/tunnels"
+          "src": "/api/apps/tunnel/panel/tunnels"
         }
       ]
     }

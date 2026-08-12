@@ -268,6 +268,6 @@ def test_http_error_codes(ctx, store, manager):
 
 def test_settings_page_is_served(ctx, store, manager):
     client = TestClient(build_routes(ctx, store, manager))
-    res = client.get("/ui/tunnels")
+    res = client.get("/panel/tunnels")
     assert res.status_code == 200
     assert "/api/apps/tunnel" in res.text

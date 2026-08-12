@@ -7,7 +7,7 @@
     POST   /tunnels/{id}/start   (re)start — also the "apply" button
     POST   /tunnels/{id}/stop    stop without disabling
     GET    /remote-hosts         linked hosts, for the destination picker
-    GET    /ui/tunnels           the settings page (see tunnels_ui.py)
+    GET    /panel/tunnels        the settings page (see tunnels_ui.py)
 """
 from __future__ import annotations
 
@@ -87,7 +87,9 @@ def build_routes(ctx, store: TunnelStore, manager: TunnelManager) -> FastAPI:
         just falls back to a free-text field."""
         return await list_linked_hosts()
 
-    @app.get("/ui/tunnels", response_class=HTMLResponse)
+    # NOT under /ui/ — core owns GET /api/apps/{slug}/ui/{path:path} for
+    # component-mode ESM bundles and shadows anything an app mounts there.
+    @app.get("/panel/tunnels", response_class=HTMLResponse)
     async def tunnels_ui() -> HTMLResponse:
         return HTMLResponse(TUNNELS_UI_HTML)
 
