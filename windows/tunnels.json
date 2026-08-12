@@ -1,0 +1,18 @@
+{
+  "layout": "stack",
+  "regions": [
+    {
+      "id": "tunnels",
+      "widgets": [
+        {
+          "type": "markdown",
+          "value": "## Tunnels\nA tunnel is a **local TCP port that forwards somewhere else**. Point an app at `127.0.0.1:<port>` and it never needs to know what is on the other side."
+        },
+        {
+          "type": "iframe",
+          "src": "/api/apps/tunnel/ui/tunnels"
+        }
+      ]
+    }
+  ]
+}
