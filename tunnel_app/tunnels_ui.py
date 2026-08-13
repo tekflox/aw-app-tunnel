@@ -37,7 +37,11 @@ TUNNELS_UI_HTML = """<!doctype html>
     --panel: rgba(128,128,128,.06);
   }
   * { box-sizing: border-box; }
-  body { margin: 0; font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  /* The gutter has to live HERE. The host renders this page in a
+     cross-origin iframe, so no stylesheet of its can reach inside; padding on
+     the <iframe> itself only shifts the origin and clips the right-hand side
+     (tried, reverted). Without this the form sits flush against the frame. */
+  body { margin: 0; padding: 12px; font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
          background: transparent; color: inherit; }
 
   /* ── cards ─────────────────────────────────────────────────────────── */
