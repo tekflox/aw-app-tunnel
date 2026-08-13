@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "tunnel",
   "name": "Tunnel",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Named local TCP endpoints that forward to a destination, so consumers point at 127.0.0.1:<port> and never learn what is on the other side. Two destination kinds: a custom IP:port (a plain TCP proxy, working today) and a linked aw-remote-host (needs tcp_* frames on the /link tunnel \u2014 not shipped yet, and the UI says so rather than pretending). Each tunnel chooses its own bind address, which is what decides who may use it.",
   "tier": "inprocess",
   "requires_ui_refresh": true,
