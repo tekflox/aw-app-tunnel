@@ -1,3 +1,4 @@
 # The forwarder tests are async (real asyncio servers + sockets), which the
 # reusable release workflow's baseline pip install does not cover.
-pytest-asyncio>=0.23
+pytest-asyncio>=0.23  # the forwarder tests are async (real sockets)
+websockets>=12        # remote_dial opens the relay WebSocket

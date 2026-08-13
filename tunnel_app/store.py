@@ -54,12 +54,13 @@ TABLE_COLUMNS_SQL = """
 
 DEST_KINDS = ("custom", "remote_host")
 
-# Destination kinds whose transport actually exists today.
-READY_DEST_KINDS = ("custom",)
+# Destination kinds whose transport actually exists today. remote_host joined
+# once tcp_open/tcp_data/tcp_close shipped in aw-remote-host (Go) and
+# aw-backend's host_link.py — see forwarder.RemoteHostDialer.
+READY_DEST_KINDS = ("custom", "remote_host")
 
 NOT_READY_REASON = (
-    "Remote-host tunnels need tcp_* frames on the /link tunnel, which "
-    "aw-remote-host and aw-backend do not implement yet. Saved, not started."
+    "This destination kind has no transport in this build."
 )
 
 LISTEN_HOSTS = {

@@ -14,6 +14,7 @@ import asyncio
 import logging
 import time
 
+from . import remote_dial
 from .store import TunnelError, TunnelStore
 
 log = logging.getLogger("aw_apps.tunnel")
@@ -117,30 +118,45 @@ class TunnelManager:
             st.active += 1
             st.last_connection_at = time.time()
             dest_r = dest_w = None
+            bridge = None
+
+            def up(n: int) -> None:
+                st.bytes_up += n
+
+            def down(n: int) -> None:
+                st.bytes_down += n
+
             try:
                 self._store.check_destination_allowed(row, self._allow_lan())
-                dest_r, dest_w = await asyncio.wait_for(
-                    asyncio.open_connection(row["dest_host"], row["dest_port"]),
-                    timeout=self._connect_timeout(),
-                )
-                st.last_error = None
-
-                def up(n: int) -> None:
-                    st.bytes_up += n
-
-                def down(n: int) -> None:
-                    st.bytes_down += n
-
-                await asyncio.gather(
-                    _pipe(client_r, dest_w, up),
-                    _pipe(dest_r, client_w, down),
-                    return_exceptions=True,
-                )
-            except (TunnelError, asyncio.TimeoutError, OSError) as e:
+                if row["dest_kind"] == "remote_host":
+                    # The address is on the HOST's network, not ours — it dials
+                    # for us over the /link tunnel it already holds open.
+                    bridge = await remote_dial.open_bridge(
+                        row["remote_host_id"], row["dest_host"], row["dest_port"])
+                    st.last_error = None
+                    await remote_dial.pump(client_r, client_w, bridge, up, down)
+                else:
+                    dest_r, dest_w = await asyncio.wait_for(
+                        asyncio.open_connection(row["dest_host"], row["dest_port"]),
+                        timeout=self._connect_timeout(),
+                    )
+                    st.last_error = None
+                    await asyncio.gather(
+                        _pipe(client_r, dest_w, up),
+                        _pipe(dest_r, client_w, down),
+                        return_exceptions=True,
+                    )
+            except (TunnelError, remote_dial.RemoteDialError,
+                    asyncio.TimeoutError, OSError) as e:
                 st.last_error = str(e) or type(e).__name__
                 log.warning("tunnel %s: %s", row["name"], st.last_error)
             finally:
                 st.active -= 1
+                if bridge is not None:
+                    try:
+                        await bridge.close()
+                    except Exception:
+                        pass
                 for w in (client_w, dest_w):
                     if w is not None:
                         try:

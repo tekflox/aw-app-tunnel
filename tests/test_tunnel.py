@@ -79,7 +79,10 @@ def _free_port() -> int:
 
 # ── store ───────────────────────────────────────────────────────────────────
 
-def test_custom_tunnel_is_ready_remote_host_is_not(store):
+def test_both_destination_kinds_are_ready(store):
+    """remote_host became ready once tcp_open/tcp_data/tcp_close shipped in
+    aw-remote-host and aw-backend. Until then it was deliberately reported as
+    not-ready rather than binding a port that could never carry anything."""
     custom = store.create({"name": "a", "listen_port": 15001,
                            "dest_host": "127.0.0.1", "dest_port": 22})
     assert custom["ready"] is True
@@ -88,9 +91,8 @@ def test_custom_tunnel_is_ready_remote_host_is_not(store):
     remote = store.create({"name": "b", "listen_port": 15002, "dest_kind": "remote_host",
                            "dest_host": "127.0.0.1", "dest_port": 5900,
                            "remote_host_id": "abc123"})
-    # Honest about the gap rather than binding a port that can never work.
-    assert remote["ready"] is False
-    assert "tcp_*" in remote["not_ready_reason"]
+    assert remote["ready"] is True
+    assert remote["not_ready_reason"] is None
 
 
 def test_remote_host_tunnel_requires_a_host_id(store):
@@ -195,12 +197,43 @@ async def test_stop_frees_the_port(store, manager):
 
 
 @pytest.mark.asyncio
-async def test_not_ready_tunnel_never_binds(store, manager):
+async def test_a_remote_host_tunnel_binds_now(store, manager):
+    """It has a real transport, so it must actually listen — the point of the
+    ready flag was never to keep it off, only to keep it honest."""
     row = store.create({"name": "rh", "listen_port": _free_port(),
                         "dest_kind": "remote_host", "dest_host": "127.0.0.1",
                         "dest_port": 5900, "remote_host_id": "h1"})
     result = await manager.start(row["id"])
-    assert result["started"] is False
+    assert result["started"] is True
+    await manager.stop_all()
+
+
+@pytest.mark.asyncio
+async def test_remote_dial_without_a_credential_fails_loudly(store, manager, monkeypatch):
+    """A missing host token must surface as a closed socket with a reason, not
+    a hang — a consumer waiting forever on a silent socket is the failure mode
+    this whole app exists to avoid."""
+    from tunnel_app import remote_dial
+    monkeypatch.setattr(remote_dial, "_env", lambda name: "")
+    with pytest.raises(remote_dial.RemoteDialError) as e:
+        await remote_dial.open_bridge("h1", "127.0.0.1", 5900)
+    assert "AW_WORKSPACE_HOST_TOKEN" in str(e.value)
+
+
+def test_bridge_url_targets_the_backend_relay(monkeypatch):
+    from tunnel_app import remote_dial
+    monkeypatch.setattr(remote_dial, "_env", lambda n: {
+        "AW_BACKEND_URL": "https://api.example.com", "AW_WORKSPACE": "aw"}.get(n, ""))
+    url = remote_dial.bridge_url("host-1", "127.0.0.1", 5900)
+    assert url.startswith("wss://api.example.com/api/workspaces/aw/remote-hosts/host-1/tcp")
+    assert "host=127.0.0.1" in url and "port=5900" in url
+
+
+def _unused_not_ready(store, manager):
+    row = store.create({"name": "x", "listen_port": _free_port(),
+                        "dest_kind": "remote_host", "dest_host": "h",
+                        "dest_port": 1, "remote_host_id": "h1"})
+    assert row
     assert manager.state(row["id"]).listening is False
 
 
