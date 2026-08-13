@@ -1,11 +1,24 @@
 """The tunnels editor served into the Settings panel's ``iframe`` widget.
 
 Same reasoning as aw-app-remote-screen's hosts_ui.py: aw-workspace-ui's
-declarative renderer has no ``table`` widget and its ``list`` takes static items
-from the spec, so a widget spec cannot render a live, editable list of rows.
-``iframe { src: "/api/*" }`` is the vocabulary's own escape hatch, and it lands
-on the same origin this page's own fetches go to, so the apex cookie authorises
-them and IdentityGuard still applies.
+declarative renderer has no ``table`` widget and its ``list`` takes static
+items from the spec, so a widget spec cannot render a live, editable list of
+rows. ``iframe { src: "/api/*" }`` is the vocabulary's own escape hatch, and it
+lands on the same origin this page's own fetches go to, so the apex cookie
+authorises them and IdentityGuard still applies.
+
+**Layout constraint that drives everything here:** the host renders this in
+`.appwin-iframe`, a `min-height: 320px` box inside the Settings sidebar — a
+NARROW, SHORT viewport, not a full window. A multi-column table there wraps
+every cell into a vertical ribbon (a one-paragraph status turns into a 300px
+tall column) and pushes the row actions off the right edge. So: one card per
+tunnel, stacked; the long "why is this not running" text collapsed behind a
+disclosure instead of inlined; the form single-column with labels above
+inputs.
+
+Colours come from the host's own palette (`--color-accent` etc. are defined on
+:root by aw-workspace-ui) with rgba fallbacks, so this reads correctly in both
+its light and dark themes without shipping a second stylesheet.
 """
 from __future__ import annotations
 
@@ -16,81 +29,143 @@ TUNNELS_UI_HTML = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Tunnels</title>
 <style>
-  :root { color-scheme: dark light; }
+  :root {
+    color-scheme: dark light;
+    --accent: var(--color-accent, #f5a623);
+    --line: var(--color-border, rgba(128,128,128,.28));
+    --muted: var(--color-text-muted, #64748b);
+    --panel: rgba(128,128,128,.06);
+  }
+  * { box-sizing: border-box; }
   body { margin: 0; font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
          background: transparent; color: inherit; }
-  table { width: 100%; border-collapse: collapse; margin-bottom: 14px; }
-  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid rgba(128,128,128,.25);
-           font-size: 12px; vertical-align: top; }
-  th { font-weight: 600; opacity: .7; font-size: 11px; text-transform: uppercase;
-       letter-spacing: .04em; }
-  td.addr { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .actions { text-align: right; white-space: nowrap; }
-  button { font: inherit; font-size: 11px; padding: 3px 9px; border-radius: 5px;
-           border: 1px solid rgba(128,128,128,.35); background: rgba(128,128,128,.12);
-           color: inherit; cursor: pointer; }
-  button:hover { background: rgba(128,128,128,.22); }
-  button.danger { border-color: rgba(220,80,80,.4); color: #e88; }
-  button.primary { border-color: rgba(90,150,240,.5); color: #8ab4f8; }
-  form { display: grid; grid-template-columns: 150px 1fr; gap: 8px 10px; align-items: center; }
-  form label { font-size: 12px; opacity: .8; }
-  input, select { font: inherit; font-size: 12px; padding: 5px 7px; border-radius: 5px;
-                  border: 1px solid rgba(128,128,128,.35); background: rgba(128,128,128,.1);
-                  color: inherit; width: 100%; box-sizing: border-box; }
-  .row-span { grid-column: 1 / -1; display: flex; gap: 8px; justify-content: flex-end; }
-  .hint { grid-column: 1 / -1; font-size: 11px; opacity: .6; margin: -2px 0 4px; }
-  .msg { padding: 6px 8px; border-radius: 5px; font-size: 12px; margin-bottom: 10px; }
-  .msg.err { background: rgba(220,80,80,.15); color: #f2a0a0; }
-  .msg.ok  { background: rgba(80,190,120,.15); color: #9edeb0; }
-  .empty { opacity: .6; font-size: 12px; padding: 10px 0; }
-  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; }
-  .up { background: #5ac37d; } .down { background: #777; } .err { background: #e07070; }
-  .why { font-size: 11px; opacity: .65; margin-top: 3px; }
-  h4 { margin: 16px 0 4px; font-size: 12px; text-transform: uppercase;
-       letter-spacing: .04em; opacity: .7; }
+
+  /* ── cards ─────────────────────────────────────────────────────────── */
+  .card { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
+          margin-bottom: 8px; background: var(--panel); }
+  .card-top { display: flex; align-items: center; gap: 8px; }
+  .name { font-weight: 600; font-size: 13px; flex: 1; min-width: 0;
+          overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .route { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+           font-size: 11px; color: var(--muted); margin-top: 4px;
+           overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .meta { font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+  .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  .dot.up { background: #4ade80; box-shadow: 0 0 0 3px rgba(74,222,128,.15); }
+  .dot.down { background: #94a3b8; }
+  .dot.err { background: #f87171; box-shadow: 0 0 0 3px rgba(248,113,113,.15); }
+  .state { font-size: 11px; color: var(--muted); flex: none; }
+
+  /* The not-ready explanation is a paragraph. Inlining it in a narrow pane is
+     what made the old table unreadable — keep it one line, expandable. */
+  details.why { margin-top: 6px; }
+  details.why summary { cursor: pointer; font-size: 11px; color: var(--muted);
+                        list-style: none; display: flex; align-items: center; gap: 5px; }
+  details.why summary::-webkit-details-marker { display: none; }
+  details.why summary::before { content: "▸"; font-size: 9px; transition: transform .15s; }
+  details.why[open] summary::before { transform: rotate(90deg); }
+  details.why p { margin: 6px 0 0; font-size: 11px; line-height: 1.5; color: var(--muted);
+                  padding-left: 14px; }
+
+  /* ── buttons ───────────────────────────────────────────────────────── */
+  .actions { display: flex; gap: 5px; flex: none; }
+  button { font: inherit; font-size: 11px; font-weight: 500; padding: 4px 10px;
+           border-radius: 6px; border: 1px solid var(--line);
+           background: transparent; color: inherit; cursor: pointer;
+           transition: background .12s, border-color .12s, color .12s; }
+  button:hover { background: rgba(128,128,128,.16); border-color: rgba(128,128,128,.45); }
+  button.primary { background: var(--accent); border-color: var(--accent);
+                   color: #1a1205; font-weight: 600; }
+  button.primary:hover { filter: brightness(1.08); background: var(--accent); }
+  button.ghost { border-color: transparent; color: var(--muted); padding: 4px 7px; }
+  button.ghost:hover { color: inherit; }
+  button.danger:hover { background: rgba(248,113,113,.14);
+                        border-color: rgba(248,113,113,.45); color: #f87171; }
+
+  /* ── form ──────────────────────────────────────────────────────────── */
+  h4 { margin: 18px 0 8px; font-size: 11px; text-transform: uppercase;
+       letter-spacing: .05em; color: var(--muted); font-weight: 600; }
+  .field { margin-bottom: 10px; }
+  .field > label { display: block; font-size: 12px; font-weight: 500; margin-bottom: 4px; }
+  input, select { font: inherit; font-size: 12px; padding: 6px 8px; border-radius: 6px;
+                  border: 1px solid var(--line); background: rgba(128,128,128,.08);
+                  color: inherit; width: 100%; }
+  input:focus, select:focus { outline: none; border-color: var(--accent); }
+  input[type=checkbox] { width: auto; accent-color: var(--accent); }
+  .hint { font-size: 11px; color: var(--muted); margin-top: 4px; line-height: 1.45; }
+  .row2 { display: flex; gap: 8px; }
+  .row2 > .field { flex: 1; margin-bottom: 0; }
+  .form-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
+  .check { display: flex; align-items: center; gap: 8px; }
+
+  .msg { padding: 7px 10px; border-radius: 7px; font-size: 12px; margin-bottom: 10px;
+         line-height: 1.45; }
+  .msg.err { background: rgba(248,113,113,.13); color: #fca5a5; }
+  .msg.ok  { background: rgba(74,222,128,.13); color: #86efac; }
+  .empty { color: var(--muted); font-size: 12px; padding: 14px 0; text-align: center; }
 </style>
 </head>
 <body>
 <div id="msg"></div>
 <div id="list"></div>
+
 <h4 id="form-title">Add a tunnel</h4>
 <form id="form" autocomplete="off">
   <input type="hidden" id="id">
-  <label for="name">Name</label>
-  <input id="name" placeholder="macbook-vnc" required>
 
-  <label for="listen_port">Local port</label>
-  <input id="listen_port" type="number" min="1" max="65535" placeholder="15900" required>
+  <div class="field">
+    <label for="name">Name</label>
+    <input id="name" placeholder="macbook-vnc" required>
+  </div>
 
-  <label for="listen_host">Who can use it</label>
-  <select id="listen_host">
-    <option value="127.0.0.1">This workspace only (recommended)</option>
-    <option value="0.0.0.0">Also other app containers</option>
-  </select>
-  <div class="hint">Tier-1 apps (Remote Screen among them) run inside the workspace and share
-    its loopback, so the first option already covers them. The second also reaches Tier-2
-    containers (Browser, Code Server), which have their own network &mdash; at the cost of
-    every container on that network being able to use this tunnel.</div>
+  <div class="row2">
+    <div class="field">
+      <label for="listen_port">Local port</label>
+      <input id="listen_port" type="number" min="1" max="65535" placeholder="15900" required>
+    </div>
+    <div class="field">
+      <label for="dest_port">Destination port</label>
+      <input id="dest_port" type="number" min="1" max="65535" placeholder="5900" required>
+    </div>
+  </div>
 
-  <label for="dest_kind">Destination</label>
-  <select id="dest_kind">
-    <option value="custom">Custom IP / host (TCP proxy)</option>
-    <option value="remote_host">Remote host (over its /link tunnel)</option>
-  </select>
+  <div class="field">
+    <label for="listen_host">Who can use it</label>
+    <select id="listen_host">
+      <option value="127.0.0.1">This workspace only (recommended)</option>
+      <option value="0.0.0.0">Also other app containers</option>
+    </select>
+    <div class="hint">Apps running inside the workspace share its loopback, so the first
+      option already covers them. The second also reaches app containers with their own
+      network &mdash; at the cost of every one of them being able to use this tunnel.</div>
+  </div>
 
-  <label for="remote_host_id" id="rh-label">Remote host</label>
-  <select id="remote_host_id"></select>
-  <div class="hint" id="rh-hint"></div>
+  <div class="field">
+    <label for="dest_kind">Destination</label>
+    <select id="dest_kind">
+      <option value="custom">Custom IP / host (TCP proxy)</option>
+      <option value="remote_host">Remote host (over its /link tunnel)</option>
+    </select>
+  </div>
 
-  <label for="dest_host" id="dest-host-label">Destination host</label>
-  <input id="dest_host" placeholder="127.0.0.1">
-  <label for="dest_port">Destination port</label>
-  <input id="dest_port" type="number" min="1" max="65535" placeholder="5900" required>
+  <div class="field" id="rh-field">
+    <label for="remote_host_id">Remote host</label>
+    <select id="remote_host_id"></select>
+    <div class="hint" id="rh-hint"></div>
+  </div>
 
-  <label for="enabled">Enabled</label>
-  <input id="enabled" type="checkbox" checked style="width:auto">
+  <div class="field">
+    <label for="dest_host" id="dest-host-label">Destination host</label>
+    <input id="dest_host" placeholder="127.0.0.1">
+  </div>
 
-  <div class="row-span">
+  <div class="field check">
+    <input id="enabled" type="checkbox" checked>
+    <label for="enabled" style="margin:0">Enabled</label>
+  </div>
+
+  <div class="form-actions">
     <button type="button" id="cancel" hidden>Cancel</button>
     <button type="submit" class="primary" id="save">Add tunnel</button>
   </div>
@@ -129,19 +204,20 @@ function bytes(n) {
   return n.toFixed(i ? 1 : 0) + ' ' + u[i];
 }
 
-function stateDot(t) {
-  if (t.listening) return '<span class="dot up"></span>listening';
-  if (t.last_error) return '<span class="dot err"></span>error';
-  return '<span class="dot down"></span>stopped';
+function stateOf(t) {
+  if (t.listening) return ['up', 'listening'];
+  if (t.not_ready_reason) return ['err', 'not ready'];
+  if (t.last_error) return ['err', 'error'];
+  if (!t.enabled) return ['down', 'disabled'];
+  return ['down', 'stopped'];
 }
 
-function destLabel(t) {
+function destOf(t) {
   if (t.dest_kind === 'remote_host') {
     const h = hosts.find((x) => x.id === t.remote_host_id);
-    return (h ? esc(h.hostname) : esc(t.remote_host_id || '?')) +
-           ' &rarr; ' + esc(t.dest_host) + ':' + t.dest_port;
+    return (h ? h.hostname : (t.remote_host_id || '?')) + ' \\u2192 ' + t.dest_host + ':' + t.dest_port;
   }
-  return esc(t.dest_host) + ':' + t.dest_port;
+  return t.dest_host + ':' + t.dest_port;
 }
 
 function render() {
@@ -149,26 +225,33 @@ function render() {
     $('list').innerHTML = '<div class="empty">No tunnels yet.</div>';
     return;
   }
-  $('list').innerHTML =
-    '<table><thead><tr><th>Name</th><th>Listens on</th><th>Forwards to</th>' +
-    '<th>State</th><th>Traffic</th><th></th></tr></thead><tbody>' +
-    tunnels.map((t) =>
-      '<tr><td>' + esc(t.name) + (t.enabled ? '' : ' <span class="why">(disabled)</span>') + '</td>' +
-      '<td class="addr">' + esc(t.listen_host) + ':' + t.listen_port + '</td>' +
-      '<td class="addr">' + destLabel(t) + '</td>' +
-      '<td>' + stateDot(t) +
-        (t.not_ready_reason ? '<div class="why">' + esc(t.not_ready_reason) + '</div>' : '') +
-        (t.last_error && !t.not_ready_reason
-          ? '<div class="why">' + esc(t.last_error) + '</div>' : '') + '</td>' +
-      '<td>' + t.active_connections + ' active / ' + t.total_connections + ' total' +
-        '<div class="why">&uarr; ' + bytes(t.bytes_up) + ' &darr; ' + bytes(t.bytes_down) + '</div></td>' +
-      '<td class="actions">' +
-        '<button data-start="' + esc(t.id) + '">' + (t.listening ? 'Restart' : 'Start') + '</button> ' +
-        (t.listening ? '<button data-stop="' + esc(t.id) + '">Stop</button> ' : '') +
-        '<button data-edit="' + esc(t.id) + '">Edit</button> ' +
-        '<button class="danger" data-del="' + esc(t.id) + '">Delete</button>' +
-      '</td></tr>'
-    ).join('') + '</tbody></table>';
+  $('list').innerHTML = tunnels.map((t) => {
+    const [cls, label] = stateOf(t);
+    const why = t.not_ready_reason || t.last_error;
+    const traffic = t.total_connections
+      ? t.active_connections + ' active \\u00b7 ' + t.total_connections + ' total \\u00b7 \\u2191'
+        + bytes(t.bytes_up) + ' \\u2193' + bytes(t.bytes_down)
+      : '';
+    return '<div class="card">'
+      + '<div class="card-top">'
+      +   '<span class="dot ' + cls + '"></span>'
+      +   '<span class="name" title="' + esc(t.name) + '">' + esc(t.name) + '</span>'
+      +   '<span class="state">' + label + '</span>'
+      +   '<span class="actions">'
+      +     '<button class="primary" data-start="' + esc(t.id) + '">'
+      +       (t.listening ? 'Restart' : 'Start') + '</button>'
+      +     (t.listening ? '<button data-stop="' + esc(t.id) + '">Stop</button>' : '')
+      +     '<button class="ghost" data-edit="' + esc(t.id) + '">Edit</button>'
+      +     '<button class="ghost danger" data-del="' + esc(t.id) + '">Delete</button>'
+      +   '</span>'
+      + '</div>'
+      + '<div class="route" title="' + esc(t.listen_host + ':' + t.listen_port + ' \\u2192 ' + destOf(t)) + '">'
+      +   esc(t.listen_host) + ':' + t.listen_port + ' \\u2192 ' + esc(destOf(t)) + '</div>'
+      + (traffic ? '<div class="meta">' + traffic + '</div>' : '')
+      + (why ? '<details class="why"><summary>Why is it not running?</summary>'
+             + '<p>' + esc(why) + '</p></details>' : '')
+      + '</div>';
+  }).join('');
 }
 
 async function refresh() {
@@ -191,12 +274,7 @@ async function loadHosts() {
 
 function applyKind() {
   const remote = $('dest_kind').value === 'remote_host';
-  for (const id of ['remote_host_id']) {
-    $(id).hidden = !remote;
-    const l = document.querySelector('label[for="' + id + '"]');
-    if (l) l.hidden = !remote;
-  }
-  $('rh-hint').hidden = !remote;
+  $('rh-field').hidden = !remote;
   $('dest-host-label').textContent = remote ? 'Host (as seen there)' : 'Destination host';
 }
 $('dest_kind').addEventListener('change', applyKind);
@@ -228,24 +306,26 @@ function loadForEdit(id) {
   $('cancel').hidden = false;
   applyKind();
   $('name').focus();
+  $('form-title').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 $('list').addEventListener('click', async (e) => {
-  const t = e.target;
-  const id = t.getAttribute('data-start') || t.getAttribute('data-stop') ||
-             t.getAttribute('data-edit') || t.getAttribute('data-del');
+  const b = e.target.closest('button');
+  if (!b) return;
+  const id = b.getAttribute('data-start') || b.getAttribute('data-stop') ||
+             b.getAttribute('data-edit') || b.getAttribute('data-del');
   if (!id) return;
   try {
-    if (t.hasAttribute('data-edit')) return loadForEdit(id);
-    if (t.hasAttribute('data-start')) {
+    if (b.hasAttribute('data-edit')) return loadForEdit(id);
+    if (b.hasAttribute('data-start')) {
       const r = await call('POST', '/tunnels/' + encodeURIComponent(id) + '/start');
       say(r.started ? 'Started.' : esc(r.reason || 'Not started.'), r.started ? 'ok' : 'err');
-    } else if (t.hasAttribute('data-stop')) {
+    } else if (b.hasAttribute('data-stop')) {
       await call('POST', '/tunnels/' + encodeURIComponent(id) + '/stop');
       say('Stopped.', 'ok');
     } else {
-      const tun = tunnels.find((x) => x.id === id);
-      if (!confirm('Delete "' + (tun ? tun.name : id) + '"?')) return;
+      const t = tunnels.find((x) => x.id === id);
+      if (!confirm('Delete "' + (t ? t.name : id) + '"?')) return;
       await call('DELETE', '/tunnels/' + encodeURIComponent(id));
       if ($('id').value === id) resetForm();
       say('Deleted.', 'ok');
@@ -276,14 +356,19 @@ $('form').addEventListener('submit', async (e) => {
     resetForm();
     await refresh();
     say(saved.not_ready_reason
-      ? 'Saved, but not started: ' + esc(saved.not_ready_reason)
+      ? 'Saved, but not started \\u2014 see the tunnel above.'
       : (id ? 'Saved.' : 'Tunnel added.'), saved.not_ready_reason ? 'err' : 'ok');
   } catch (err) { say(esc(err.message), 'err'); }
 });
 
-// Live counters are the whole point of this page — a tunnel you just created
-// should visibly start carrying bytes without a manual reload.
-setInterval(() => refresh().catch(() => {}), 4000);
+// Live counters are the point of this page — a tunnel you just created should
+// visibly start carrying bytes without a manual reload. Skip the refresh while
+// a disclosure is open or a field is focused, so it never yanks the UI.
+setInterval(() => {
+  if (document.querySelector('details.why[open]')) return;
+  if (['INPUT', 'SELECT'].includes(document.activeElement?.tagName)) return;
+  refresh().catch(() => {});
+}, 4000);
 
 applyKind();
 loadHosts();
