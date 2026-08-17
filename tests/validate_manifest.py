@@ -1,12 +1,31 @@
 #!/usr/bin/env python3
-"""Validates aw-app.json — schema, referenced files, and the things that only
-blow up on a REAL install.
+"""Validates an app's aw-app.json — schema, referenced files, and the things
+that only blow up on a REAL install.
 
-Run with the AW venv (jsonschema is installed there):
-    .venv/aw/bin/python tests/validate_manifest.py
+**The canonical copy lives in aw-marketplace** (`scripts/validate_manifest.py`
++ `schemas/aw-app.schema.json`), and `app-release.yml` runs THAT against every
+app it releases. This copy is for running the same checks locally before you
+push:
 
-TEMPLATE: copy this file verbatim into any new app — it's fully generic,
-nothing here references "hello"/"template".
+    python3 tests/validate_manifest.py aw-app.json
+
+TEMPLATE: keep this file. A new app inherits it from here, and it is the
+difference between finding a bad manifest now and finding it when a release
+fails. CI no longer depends on its presence — but you do.
+
+It used to live only inside each app repo, alongside a copy of the schema. That
+produced 28 copies in 10 different versions, drifting apart with nobody
+noticing — and the release workflow only ran the check `if [ -f
+tests/validate_manifest.py ]`, so an app that simply lacked the file published
+with no validation at all. That is how aw-app-kb's release failed on a
+permission its schema copy had never heard of while aw-app-architecture, which
+declares the same one, released green without being checked.
+
+    python3 validate_manifest.py <manifest.json> [--schema <schema.json>]
+
+If this local copy drifts from the canonical one it can only be *more*
+permissive by accident — CI validates against aw-marketplace's either way, so a
+stale copy here can no longer let anything through.
 
 Beyond the JSON schema, this catches three classes of bug that a schema
 cannot, and that every one of them has shipped at least once:
@@ -31,6 +50,41 @@ from pathlib import Path
 import jsonschema
 
 ROOT = Path(__file__).resolve().parent.parent
+
+# Referenced files resolve relative to the MANIFEST's directory, so this runs
+# against any app's checkout from anywhere.
+_args = [a for a in sys.argv[1:] if not a.startswith("--")]
+_schema_flag = None
+if "--schema" in sys.argv:
+    _schema_flag = Path(sys.argv[sys.argv.index("--schema") + 1]).resolve()
+
+MANIFEST_PATH = Path(_args[0]).resolve() if _args else Path("aw-app.json").resolve()
+APP_ROOT = MANIFEST_PATH.parent
+def _resolve_schema() -> Path:
+    """Where the schema comes from, most explicit first.
+
+    A new app does NOT need its own `schemas/` copy — that duplication is what
+    produced 28 files in 10 drifted versions. If this repo happens to still
+    carry one it is honoured (older apps do), otherwise the canonical copy in a
+    sibling aw-marketplace checkout is used, which is also what CI validates
+    against.
+    """
+    if _schema_flag:
+        return _schema_flag
+    local = ROOT / "schemas" / "aw-app.schema.json"
+    if local.is_file():
+        return local
+    sibling = ROOT.parent / "aw-marketplace" / "schemas" / "aw-app.schema.json"
+    if sibling.is_file():
+        return sibling
+    raise SystemExit(
+        "no schema found. This repo has no schemas/aw-app.schema.json and "
+        "aw-marketplace is not checked out next to it — pass one explicitly:\n"
+        "    python3 tests/validate_manifest.py aw-app.json --schema <path>"
+    )
+
+
+SCHEMA_PATH = _resolve_schema()
 
 # The widget types aw-workspace-ui's declarative renderer actually implements
 # (src/components/AppWindow.jsx). Keep in sync with that file; anything else
@@ -63,8 +117,8 @@ def warn(msg: str) -> None:
     warnings.append(msg)
 
 
-manifest = json.loads((ROOT / "aw-app.json").read_text())
-schema = json.loads((ROOT / "schemas" / "aw-app.schema.json").read_text())
+manifest = json.loads(MANIFEST_PATH.read_text())
+schema = json.loads(SCHEMA_PATH.read_text())
 jsonschema.validate(instance=manifest, schema=schema)
 
 contributes = manifest.get("contributes", {}) or {}
@@ -72,12 +126,12 @@ contributes = manifest.get("contributes", {}) or {}
 # ── 1. referenced files must exist ──────────────────────────────────────────
 
 for cli in contributes.get("system_clis", []) or []:
-    if not (ROOT / cli["installer"]).is_file():
+    if not (APP_ROOT / cli["installer"]).is_file():
         fail(f"installer script missing: {cli['installer']}")
 
 frontend = contributes.get("frontend") or {}
 bundle = frontend.get("bundle")
-if bundle and not (ROOT / bundle).is_file():
+if bundle and not (APP_ROOT / bundle).is_file():
     # The built bundle is COMMITTED in every shipping app (aw-app-whiteboard,
     # aw-app-remote-screen, ...) because the release workflow runs tests only
     # — it never runs `npm run build`. A gitignored dist therefore means the
@@ -88,12 +142,24 @@ if bundle and not (ROOT / bundle).is_file():
          f".gitignore does not exclude it)")
 
 for skill in contributes.get("skills", []) or []:
-    if not (ROOT / skill["path"]).is_file():
+    if not (APP_ROOT / skill["path"]).is_file():
         fail(f"skill file missing: {skill['path']}")
+
+# contributes.agents may point a system prompt / group instructions at a file
+# in the package. A missing one is the quietest failure of the lot: the
+# workspace drops that single field with a log line and seeds the agent
+# anyway, so you get a live agent with an EMPTY prompt.
+for _kind, _field in (("agents", "system_prompt_file"), ("groups", "instructions_file")):
+    for entry in ((contributes.get("agents") or {}).get(_kind) or []):
+        ref = entry.get(_field)
+        if ref and not (APP_ROOT / ref).is_file():
+            fail(f"contributes.agents.{_kind}[{entry.get('slug')!r}]: {_field} "
+                 f"{ref!r} does not exist — the object is still created, with "
+                 f"that field empty.")
 
 migrations = manifest.get("migrations") or {}
 if migrations:
-    mig_dir = ROOT / (migrations.get("dir") or "migrations")
+    mig_dir = APP_ROOT / (migrations.get("dir") or "migrations")
     if not mig_dir.is_dir():
         fail(f"migrations.dir declared but missing: {mig_dir.name}/")
 
@@ -141,7 +207,7 @@ for win in windows:
     if body.get("type") != "declarative":
         continue
     declarative_window_ids.add(win["id"])
-    spec_path = ROOT / body["spec"]
+    spec_path = APP_ROOT / body["spec"]
     if not spec_path.is_file():
         fail(f"window spec missing: {body['spec']}")
         continue
