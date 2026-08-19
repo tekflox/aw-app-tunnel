@@ -86,6 +86,13 @@ TUNNELS_UI_HTML = """<!doctype html>
   button.ghost:hover { color: inherit; }
   button.danger:hover { background: rgba(248,113,113,.14);
                         border-color: rgba(248,113,113,.45); color: #f87171; }
+  /* The armed half of the two-click delete — filled, so "one more click and
+     it's gone" doesn't depend on reading the label. The :hover variant repeats
+     the whole declaration because `button.danger:hover` above is more specific
+     than a bare `.danger.armed`, and the armed button is ALWAYS hovered: it
+     renders exactly under the cursor that just clicked Delete. */
+  button.danger.armed, button.danger.armed:hover {
+    background: #f87171; border-color: #f87171; color: #2a0808; font-weight: 600; }
 
   /* ── form ──────────────────────────────────────────────────────────── */
   h4 { margin: 18px 0 8px; font-size: 11px; text-transform: uppercase;
@@ -179,6 +186,12 @@ TUNNELS_UI_HTML = """<!doctype html>
 const BASE = '/api/apps/tunnel';
 const $ = (id) => document.getElementById(id);
 let tunnels = [];
+// Id of the tunnel whose Delete is armed. This panel CANNOT use confirm(): the
+// host renders it in a sandbox without allow-modals (aw-workspace-ui
+// AppWindow.jsx — "allow-scripts allow-forms allow-same-origin"), so the
+// browser ignores the call and returns false. `if (!confirm(...)) return;` was
+// therefore an unconditional return and Delete silently did nothing.
+let armed = null;
 let hosts = [];
 
 async function call(method, path, body) {
@@ -246,7 +259,10 @@ function render() {
       +       (t.listening ? 'Restart' : 'Start') + '</button>'
       +     (t.listening ? '<button data-stop="' + esc(t.id) + '">Stop</button>' : '')
       +     '<button class="ghost" data-edit="' + esc(t.id) + '">Edit</button>'
-      +     '<button class="ghost danger" data-del="' + esc(t.id) + '">Delete</button>'
+      +     (armed === t.id
+                ? '<button class="ghost danger armed" data-confirm-del="' + esc(t.id) + '">Confirm</button>'
+                  + '<button class="ghost" data-cancel-del="1">Cancel</button>'
+                : '<button class="ghost danger" data-del="' + esc(t.id) + '">Delete</button>')
       +   '</span>'
       + '</div>'
       + '<div class="route" title="' + esc(t.listen_host + ':' + t.listen_port + ' \\u2192 ' + destOf(t)) + '">'
@@ -316,8 +332,10 @@ function loadForEdit(id) {
 $('list').addEventListener('click', async (e) => {
   const b = e.target.closest('button');
   if (!b) return;
+  if (b.hasAttribute('data-cancel-del')) { armed = null; return render(); }
   const id = b.getAttribute('data-start') || b.getAttribute('data-stop') ||
-             b.getAttribute('data-edit') || b.getAttribute('data-del');
+             b.getAttribute('data-edit') || b.getAttribute('data-del') ||
+             b.getAttribute('data-confirm-del');
   if (!id) return;
   try {
     if (b.hasAttribute('data-edit')) return loadForEdit(id);
@@ -327,9 +345,14 @@ $('list').addEventListener('click', async (e) => {
     } else if (b.hasAttribute('data-stop')) {
       await call('POST', '/tunnels/' + encodeURIComponent(id) + '/stop');
       say('Stopped.', 'ok');
-    } else {
+    } else if (b.hasAttribute('data-del')) {
       const t = tunnels.find((x) => x.id === id);
-      if (!confirm('Delete "' + (t ? t.name : id) + '"?')) return;
+      armed = id;
+      render();
+      say('Delete "' + esc(t ? t.name : id) + '"? Click Confirm.', 'err');
+      return;
+    } else {
+      armed = null;
       await call('DELETE', '/tunnels/' + encodeURIComponent(id));
       if ($('id').value === id) resetForm();
       say('Deleted.', 'ok');

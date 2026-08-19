@@ -304,3 +304,47 @@ def test_settings_page_is_served(ctx, store, manager):
     res = client.get("/panel/tunnels")
     assert res.status_code == 200
     assert "/api/apps/tunnel" in res.text
+
+
+def test_tunnels_panel_never_calls_confirm_or_alert():
+    """The panel runs in a sandbox WITHOUT allow-modals.
+
+    aw-workspace-ui's AppWindow.jsx mounts an `iframe` widget with
+    sandbox="allow-scripts allow-forms allow-same-origin". The browser ignores
+    window.confirm() there and returns false, so `if (!confirm(...)) return;`
+    is an unconditional return — which is how the Delete button shipped doing
+    nothing at all: no error, no request, no console entry.
+    """
+    import re
+    from tunnel_app.tunnels_ui import TUNNELS_UI_HTML
+
+    code = re.sub(r"^\s*//.*$", "", TUNNELS_UI_HTML, flags=re.MULTILINE)  # comments may name them
+    for banned in ("confirm(", "alert(", "prompt("):
+        assert banned not in code, f"{banned} silently does nothing in this sandbox"
+
+
+def test_panel_javascript_actually_parses():
+    """The panel's JS lives inside a Python string, so nothing type-checks it.
+
+    A broken edit produces a page that loads, renders its static HTML, and runs
+    none of its script — no console error a Python test can see, just an empty
+    list. Exactly what a leading '+' inside a ternary did while patching out
+    confirm(). node --check is the cheapest real parser available.
+    """
+    import re, shutil, subprocess, tempfile, os
+    from tunnel_app.tunnels_ui import TUNNELS_UI_HTML
+
+    node = shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not available")
+    js = re.search(r"<script>(.*?)</script>", TUNNELS_UI_HTML, re.S)
+    assert js, "panel has no <script> block"
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
+        f.write(js.group(1))
+        path = f.name
+    try:
+        proc = subprocess.run([node, "--check", path], capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+    finally:
+        os.unlink(path)
