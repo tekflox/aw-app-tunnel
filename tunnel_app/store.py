@@ -48,6 +48,7 @@ TABLE_COLUMNS_SQL = """
     dest_host      TEXT NOT NULL DEFAULT '',
     dest_port      INTEGER NOT NULL DEFAULT 0,
     remote_host_id TEXT NOT NULL DEFAULT '',
+    manual_stopped BOOLEAN NOT NULL DEFAULT FALSE,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 """
@@ -97,20 +98,19 @@ class TunnelStore:
 
     # ── reads ───────────────────────────────────────────────────────────────
 
+    _SELECT_COLUMNS = (
+        "SELECT id, name, enabled, listen_host, listen_port, dest_kind, "
+        "dest_host, dest_port, remote_host_id, manual_stopped FROM {table} "
+    )
+
     def list(self) -> list[dict]:
         rows = self._ctx.db.execute(
-            self._table,
-            "SELECT id, name, enabled, listen_host, listen_port, dest_kind, "
-            "dest_host, dest_port, remote_host_id FROM {table} "
-            "ORDER BY listen_port",
-        )
+            self._table, self._SELECT_COLUMNS + "ORDER BY listen_port")
         return [self._public(r) for r in rows]
 
     def get(self, tunnel_id: str) -> dict:
         rows = self._ctx.db.execute(
-            self._table,
-            "SELECT id, name, enabled, listen_host, listen_port, dest_kind, "
-            "dest_host, dest_port, remote_host_id FROM {table} WHERE id = :id",
+            self._table, self._SELECT_COLUMNS + "WHERE id = :id",
             {"id": tunnel_id},
         )
         if not rows:
@@ -131,6 +131,10 @@ class TunnelStore:
             "dest_host": row[6],
             "dest_port": row[7],
             "remote_host_id": row[8],
+            # Stopped on purpose, durably — see migrations/0002. Distinct from
+            # ``enabled``: the tunnel is still configured and one click away,
+            # it just must not be re-bound by the leader's reconcile tick.
+            "manual_stopped": bool(row[9]),
             "ready": ready,
             "not_ready_reason": None if ready else NOT_READY_REASON,
         }
@@ -227,6 +231,24 @@ class TunnelStore:
             "dest_port = :dest_port, remote_host_id = :remote_host_id, "
             "updated_at = now() WHERE id = :id",
             {"id": tunnel_id, **fields},
+        )
+        return self.get(tunnel_id)
+
+    def set_manual_stopped(self, tunnel_id: str, value: bool) -> dict:
+        """Record (or clear) "stopped on purpose".
+
+        The only cross-worker channel for ``POST /tunnels/{id}/stop`` that is
+        actually reliable: the old in-memory stop reached one worker of N, and
+        a broadcast is dropped outright when Redis is down. The leader's
+        reconcile tick reads this table every pass, so writing it here is what
+        makes the stop take effect wherever the listener really lives.
+        """
+        self.get(tunnel_id)  # 404 before we touch anything
+        self._ctx.db.execute(
+            self._table,
+            "UPDATE {table} SET manual_stopped = :manual_stopped, "
+            "updated_at = now() WHERE id = :id",
+            {"id": tunnel_id, "manual_stopped": bool(value)},
         )
         return self.get(tunnel_id)
 

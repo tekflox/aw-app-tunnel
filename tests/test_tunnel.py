@@ -16,41 +16,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from fake_ctx import FakeCtx  # noqa: E402
 from tunnel_app.forwarder import TunnelManager  # noqa: E402
 from tunnel_app.routes import build_routes  # noqa: E402
 from tunnel_app.store import TunnelError, TunnelNotFound, TunnelStore  # noqa: E402
-
-
-class FakeCtx:
-    """Only what TunnelStore/TunnelManager use: app_id, config, db."""
-
-    def __init__(self, conn: sqlite3.Connection, config: dict | None = None) -> None:
-        self.app_id = "tunnel"
-        self.config = config or {}
-        self.db = self._Db(conn)
-
-    class _Db:
-        def __init__(self, conn):
-            self._conn = conn
-
-        def table(self, name):
-            return name
-
-        def create(self, name, columns_sql):
-            cols = (columns_sql
-                    .replace("TIMESTAMPTZ", "TEXT")
-                    .replace("DEFAULT now()", "DEFAULT CURRENT_TIMESTAMP")
-                    .replace("BOOLEAN", "INTEGER"))
-            self._conn.execute(f'CREATE TABLE IF NOT EXISTS "{name}" ({cols})')
-            self._conn.commit()
-            return name
-
-        def execute(self, name, sql, params=None):
-            stmt = sql.replace("{table}", f'"{name}"').replace("now()", "CURRENT_TIMESTAMP")
-            cur = self._conn.execute(stmt, params or {})
-            self._conn.commit()
-            return cur.fetchall() if stmt.strip().lower().startswith("select") else cur
 
 
 @pytest.fixture()
@@ -142,6 +113,25 @@ def test_delete(store):
     assert store.list() == []
     with pytest.raises(TunnelNotFound):
         store.get(row["id"])
+
+
+def test_manual_stopped_round_trips(store):
+    """"Stopped on purpose" has to be durable, not one worker's memory — the
+    listener lives in whichever worker holds the lease, and the old in-memory
+    stop reached one worker of N."""
+    row = store.create({"name": "a", "listen_port": 15008,
+                        "dest_host": "127.0.0.1", "dest_port": 22})
+    assert row["manual_stopped"] is False
+    assert store.set_manual_stopped(row["id"], True)["manual_stopped"] is True
+    assert store.get(row["id"])["manual_stopped"] is True
+    # An unrelated edit must not quietly resurrect it.
+    assert store.update(row["id"], {"name": "a2"})["manual_stopped"] is True
+    assert store.set_manual_stopped(row["id"], False)["manual_stopped"] is False
+
+
+def test_set_manual_stopped_on_a_missing_tunnel_is_a_404(store):
+    with pytest.raises(TunnelNotFound):
+        store.set_manual_stopped("nope", True)
 
 
 # ── forwarder: real sockets ─────────────────────────────────────────────────
@@ -288,6 +278,28 @@ def test_crud_over_http(ctx, store, manager):
                       json={"name": "a2"}).json()["name"] == "a2"
     assert client.delete(f"/tunnels/{created['id']}").status_code == 200
     assert client.get("/tunnels").json()["tunnels"] == []
+    asyncio.run(manager.stop_all())
+
+
+def test_create_and_stop_over_http_apply_immediately_without_ctx_state(
+        ctx, store, manager):
+    """With no ``ctx.state`` there is no sibling worker to coordinate with, so
+    the worker serving the request owns its own listeners and answers from its
+    own state — the pre-leadership behaviour, which is also what an app whose
+    ``state:own`` grant failed to land falls back to. ``routes._apply`` and
+    ``manager.request_reconcile`` have to agree about that, or a mutation
+    reports a state nobody applied."""
+    client = TestClient(build_routes(ctx, store, manager))
+    created = client.post("/tunnels", json={
+        "name": "a", "listen_port": _free_port(),
+        "dest_host": "127.0.0.1", "dest_port": _free_port()}).json()
+    assert created["listening"] is True
+    assert created["status"] == "listening"
+    assert created["status_source"] == "local"
+
+    stopped = client.post(f"/tunnels/{created['id']}/stop").json()
+    assert stopped["stopped"] is True
+    assert client.get("/tunnels").json()["tunnels"][0]["status"] == "stopped"
     asyncio.run(manager.stop_all())
 
 
