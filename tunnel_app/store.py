@@ -34,7 +34,10 @@ Two destination kinds, deliberately NOT equal in cost:
 from __future__ import annotations
 
 import ipaddress
+import logging
 import uuid as _uuid
+
+log = logging.getLogger("aw_apps.tunnel")
 
 TABLE_SUFFIX = "tunnels"
 
@@ -95,6 +98,41 @@ class TunnelStore:
         self._ctx = ctx
         self._table = ctx.db.table(f"app__{ctx.app_id}__{TABLE_SUFFIX}")
         ctx.db.create(self._table, TABLE_COLUMNS_SQL)
+        self._ensure_added_columns()
+
+    def _ensure_added_columns(self) -> None:
+        """Bring an EXISTING table up to the shape this code reads, before
+        anything reads it.
+
+        ``ctx.db.create`` is ``CREATE TABLE IF NOT EXISTS``, so it covers a
+        fresh install and does nothing for a column added later — that is what
+        ``migrations/`` is for. But the runtime applies an app's migrations on
+        ``load()`` *after* ``plugin.activate()`` has run
+        (``src/apps/runtime.py:663`` says so in as many words), and activate
+        constructs this store and reads it. On the first update to a version
+        that reads a new column, the migration therefore has not run yet, and
+        the read fails — which is exactly how this app's own 0.10.0 update
+        failed: ``column "manual_stopped" does not exist``, activate raised,
+        and the migration that would have added it was never reached.
+
+        So the same idempotent-bootstrap-DDL rule the table itself gets applies
+        to its added columns. ``migrations/0002`` stays: it is the authority
+        and the ledger entry, this is just the guard that lets activate survive
+        long enough to reach it.
+        """
+        try:
+            self._ctx.db.execute(
+                self._table,
+                "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS "
+                "manual_stopped BOOLEAN NOT NULL DEFAULT FALSE",
+            )
+        except Exception:  # noqa: BLE001
+            # SQLite (the tests' fake ctx) has no ADD COLUMN IF NOT EXISTS, so
+            # a second store over the same table raises here. Non-fatal by
+            # construction: if the column really is missing, the very next
+            # SELECT says so loudly rather than this swallowing it.
+            log.debug("tunnel: manual_stopped column already present",
+                      exc_info=True)
 
     # ── reads ───────────────────────────────────────────────────────────────
 

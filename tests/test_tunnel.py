@@ -21,7 +21,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from fake_ctx import FakeCtx  # noqa: E402
 from tunnel_app.forwarder import TunnelManager  # noqa: E402
 from tunnel_app.routes import build_routes  # noqa: E402
-from tunnel_app.store import TunnelError, TunnelNotFound, TunnelStore  # noqa: E402
+from tunnel_app.store import (  # noqa: E402
+    TABLE_COLUMNS_SQL, TunnelError, TunnelNotFound, TunnelStore)
 
 
 @pytest.fixture()
@@ -132,6 +133,26 @@ def test_manual_stopped_round_trips(store):
 def test_set_manual_stopped_on_a_missing_tunnel_is_a_404(store):
     with pytest.raises(TunnelNotFound):
         store.set_manual_stopped("nope", True)
+
+
+def test_the_store_adds_manual_stopped_to_a_pre_existing_table(ctx):
+    """The live 0.10.0 update failed exactly here: the runtime applies an app's
+    migrations AFTER plugin.activate(), activate constructs the store and reads
+    it, and the column the new code selects did not exist yet — so activate
+    raised and migrations/0002 was never reached. The store has to bring an
+    older table up to the shape it reads before reading it."""
+    legacy = (TABLE_COLUMNS_SQL
+              .replace("    manual_stopped BOOLEAN NOT NULL DEFAULT FALSE,\n", ""))
+    assert "manual_stopped" not in legacy
+    ctx.db.create(f"app__{ctx.app_id}__tunnels", legacy)
+
+    store = TunnelStore(ctx)      # must not raise, and must repair the table
+    row = store.create({"name": "legacy", "listen_port": 15009,
+                        "dest_host": "127.0.0.1", "dest_port": 22})
+    assert row["manual_stopped"] is False
+    assert store.list()[0]["manual_stopped"] is False
+    # Constructing a second store over the same table (another worker) is fine.
+    assert TunnelStore(ctx).get(row["id"])["manual_stopped"] is False
 
 
 # ── forwarder: real sockets ─────────────────────────────────────────────────

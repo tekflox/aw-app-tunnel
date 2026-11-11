@@ -40,7 +40,11 @@ class FakeCtx:
             return name
 
         def execute(self, name, sql, params=None):
-            stmt = sql.replace("{table}", f'"{name}"').replace("now()", "CURRENT_TIMESTAMP")
+            stmt = (sql.replace("{table}", f'"{name}"')
+                    .replace("now()", "CURRENT_TIMESTAMP")
+                    # Postgres-only spelling; SQLite raises "duplicate column
+                    # name" instead, which the caller treats the same way.
+                    .replace("ADD COLUMN IF NOT EXISTS", "ADD COLUMN"))
             cur = self._conn.execute(stmt, params or {})
             self._conn.commit()
             return cur.fetchall() if stmt.strip().lower().startswith("select") else cur
