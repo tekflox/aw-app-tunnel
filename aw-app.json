@@ -22,7 +22,8 @@
   "permissions": [
     "routes:register",
     "db:own-tables",
-    "net:outbound"
+    "net:outbound",
+    "state:own"
   ],
   "contributes": {
     "routes": [

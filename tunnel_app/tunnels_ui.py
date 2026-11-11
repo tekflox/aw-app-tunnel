@@ -221,7 +221,16 @@ function bytes(n) {
   return n.toFixed(i ? 1 : 0) + ' ' + u[i];
 }
 
+// The server decides this, not the page: only the worker that actually holds
+// the listeners knows whether a tunnel is up, so a row whose status came from
+// nowhere is rendered as 'unknown' rather than as an error this page made up.
+const UNKNOWN_WHY = 'The worker serving this request does not own the tunnel '
+  + 'listeners and no status snapshot was available (Redis may be down). This '
+  + 'says nothing about whether the tunnel is working \\u2014 traffic is '
+  + 'unaffected either way.';
+
 function stateOf(t) {
+  if (t.status === 'unknown') return ['down', 'unknown'];
   if (t.listening) return ['up', 'listening'];
   if (t.not_ready_reason) return ['err', 'not ready'];
   if (t.last_error) return ['err', 'error'];
@@ -244,7 +253,9 @@ function render() {
   }
   $('list').innerHTML = tunnels.map((t) => {
     const [cls, label] = stateOf(t);
-    const why = t.not_ready_reason || t.last_error;
+    const why = t.status === 'unknown'
+      ? UNKNOWN_WHY
+      : (t.not_ready_reason || t.last_error);
     const traffic = t.total_connections
       ? t.active_connections + ' active \\u00b7 ' + t.total_connections + ' total \\u00b7 \\u2191'
         + bytes(t.bytes_up) + ' \\u2193' + bytes(t.bytes_down)
@@ -257,7 +268,8 @@ function render() {
       +   '<span class="actions">'
       +     '<button class="primary" data-start="' + esc(t.id) + '">'
       +       (t.listening ? 'Restart' : 'Start') + '</button>'
-      +     (t.listening ? '<button data-stop="' + esc(t.id) + '">Stop</button>' : '')
+      +     (t.listening || t.status === 'unknown'
+                ? '<button data-stop="' + esc(t.id) + '">Stop</button>' : '')
       +     '<button class="ghost" data-edit="' + esc(t.id) + '">Edit</button>'
       +     (armed === t.id
                 ? '<button class="ghost danger armed" data-confirm-del="' + esc(t.id) + '">Confirm</button>'
@@ -268,7 +280,9 @@ function render() {
       + '<div class="route" title="' + esc(t.listen_host + ':' + t.listen_port + ' \\u2192 ' + destOf(t)) + '">'
       +   esc(t.listen_host) + ':' + t.listen_port + ' \\u2192 ' + esc(destOf(t)) + '</div>'
       + (traffic ? '<div class="meta">' + traffic + '</div>' : '')
-      + (why ? '<details class="why"><summary>Why is it not running?</summary>'
+      + (why ? '<details class="why"><summary>'
+             +   (t.status === 'unknown' ? 'Why is the status unknown?'
+                                        : 'Why is it not running?') + '</summary>'
              + '<p>' + esc(why) + '</p></details>' : '')
       + '</div>';
   }).join('');
@@ -341,10 +355,15 @@ $('list').addEventListener('click', async (e) => {
     if (b.hasAttribute('data-edit')) return loadForEdit(id);
     if (b.hasAttribute('data-start')) {
       const r = await call('POST', '/tunnels/' + encodeURIComponent(id) + '/start');
-      say(r.started ? 'Started.' : esc(r.reason || 'Not started.'), r.started ? 'ok' : 'err');
+      // `pending` is neither success nor failure: the change is saved and the
+      // worker that owns the listeners has been asked to apply it, but this
+      // one cannot see the result yet. Reporting it as an error would be a lie.
+      if (r.pending) say('Saved \\u2014 applying\\u2026', 'ok');
+      else say(r.started ? 'Started.' : esc(r.reason || 'Not started.'),
+               r.started ? 'ok' : 'err');
     } else if (b.hasAttribute('data-stop')) {
-      await call('POST', '/tunnels/' + encodeURIComponent(id) + '/stop');
-      say('Stopped.', 'ok');
+      const r = await call('POST', '/tunnels/' + encodeURIComponent(id) + '/stop');
+      say(r.pending ? 'Saved \\u2014 stopping\\u2026' : 'Stopped.', 'ok');
     } else if (b.hasAttribute('data-del')) {
       const t = tunnels.find((x) => x.id === id);
       armed = id;
@@ -384,7 +403,9 @@ $('form').addEventListener('submit', async (e) => {
     await refresh();
     say(saved.not_ready_reason
       ? 'Saved, but not started \\u2014 see the tunnel above.'
-      : (id ? 'Saved.' : 'Tunnel added.'), saved.not_ready_reason ? 'err' : 'ok');
+      : (saved.pending ? 'Saved \\u2014 applying\\u2026'
+                       : (id ? 'Saved.' : 'Tunnel added.')),
+      saved.not_ready_reason ? 'err' : 'ok');
   } catch (err) { say(esc(err.message), 'err'); }
 });
 
